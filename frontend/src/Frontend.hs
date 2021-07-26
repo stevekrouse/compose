@@ -26,6 +26,11 @@ import Obelisk.Generated.Static
 import Common.Route
 
 
+data MyEvent = 
+  Login Registrant | 
+  Logout | 
+  NewURL String
+
 -- someone trying to register
 -- may or may not become a User depending on validations
 -- TODO: create User type with more fields, and convert validated registrats over
@@ -56,10 +61,10 @@ register
      , PostBuild t m
      , MonadHold t m
      , MonadFix m
-     , EventWriter t (First String) m
+     , EventWriter t (First MyEvent) m
      ) => (Text -> Dynamic t Bool) 
        -> (Text -> Dynamic t Bool) 
-       -> m (Event t (Maybe  Registrant))
+       -> m ()
 register usernameAlreadyTaken emailAlreadyTaken = divClass "auth-page" $ divClass "container page" $ divClass "row" $ divClass "col-md-6 offset-md-3 col-xs-12" $ mdo
     elClass "h1" "text-xs-center" $ text "Sign up"
     elClass "p" "text-xs-center" $
@@ -109,9 +114,8 @@ register usernameAlreadyTaken emailAlreadyTaken = divClass "auth-page" $ divClas
           $ newUserSubmitted
     errors <- holdDyn [] someErrors
 
-    tellEvent $ First baseURL <$ goodUser
-
-    pure $ Just <$> goodUser
+    tellEvent $ First . Login <$> goodUser
+    tellEvent $ First (NewURL baseURL) <$ goodUser
 
 
 homePage :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m) => Maybe Registrant -> m ()
@@ -122,14 +126,14 @@ homePage loggedInUser = elClass "div" "home-page" $ mdo
       el "p" $ text "A place to share your knowledge"
 
 
-aClass :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First String) m) => String -> String -> m () -> m ()
+aClass :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First MyEvent) m) => String -> String -> m () -> m ()
 aClass route klass contents = do
   (el, _) <- elAttr' "a" (Map.fromList [("class", pack klass), ("href", "#")])
     contents
-  tellEvent $ First route <$ domEvent Click el
+  tellEvent $ First (NewURL route) <$ domEvent Click el
 
 
-navbar :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First String) m) => String -> Maybe Registrant -> m ()
+navbar :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First MyEvent) m) => String -> Maybe Registrant -> m ()
 navbar url loggedInUser = do
   elClass "nav" "navbar navbar-light" $
     elClass "div" "container" $ do
@@ -152,13 +156,13 @@ navbar url loggedInUser = do
       navItem loginURL    $ text "Sign in"
       navItem registerURL $ text "Sign up"
 
-    navItem :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First String) m) => String -> m () -> m ()
+    navItem :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First MyEvent) m) => String -> m () -> m ()
     navItem route contents = elClass "li" "nav-item" $ do
       aClass route ("nav-link" ++ if url == route then " active" else "") contents
 
 
-settings :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First String) m) => Maybe Registrant -> m (Event t (Maybe Registrant))
-settings Nothing = pure never
+settings :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First MyEvent) m) => Maybe Registrant -> m ()
+settings Nothing = pure ()
 settings (Just (Registrant username email password)) = do
   elClass "div" "settings-page" $ do
     elClass "div" "container page" $
@@ -208,10 +212,10 @@ settings (Just (Registrant username email password)) = do
               el "hr" blank
 
               logoutClick <- buttonClass "btn btn-outline-danger" $ text "Logout"
-              tellEvent $ First baseURL <$ logoutClick
-              pure $ Nothing <$ logoutClick
+              tellEvent $ First (NewURL baseURL) <$ logoutClick
+              tellEvent $ First Logout <$ logoutClick
 
-login :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First String) m) => (Text -> Text -> Dynamic t (Maybe Registrant)) -> m (Event t (Maybe Registrant))
+login :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First MyEvent) m) => (Text -> Text -> Dynamic t (Maybe Registrant)) -> m ()
 login loginUser = elClass "div" "auth-page" $ do
   elClass "div" "container-page" $ do
     elClass "div" "row" $ do
@@ -246,12 +250,12 @@ login loginUser = elClass "div" "auth-page" $ do
           let emailAndPassword = (,) <$> emailI ^. to _inputElement_value <*> passI ^. to _inputElement_value
           let emailAndPasswordE = current emailAndPassword <@ submitE
           let loggedInUser = ffilter isJust $ pushAlways (\(email, password) -> sample . current $ loginUser email password) emailAndPasswordE
-          tellEvent $ First baseURL <$ loggedInUser
+          
+          tellEvent $ fforMaybe loggedInUser (First . Login <$>)
+          tellEvent $ First (NewURL baseURL) <$ loggedInUser
 
-          pure loggedInUser
 
-
-buttonClass :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First String) m) => Text -> m a -> m (Event t ())
+buttonClass :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First MyEvent) m) => Text -> m a -> m (Event t ())
 buttonClass klass m = do
   (el, _) <- elAttr' "button" ("class" =: klass <> "type" =: "button") m
   pure $ () <$ domEvent Click el
@@ -261,22 +265,23 @@ buttonClass klass m = do
 -- passes the eventWriter updates as URL updates
 -- passes the output Event Maybe Registrant as authentication events
 -- TOODO: how do we funnel further events up to the global level?
-router :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First String) m) => String -> Maybe Registrant -> (Text -> Dynamic t Bool) -> (Text -> Dynamic t Bool) -> (Text -> Text -> Dynamic t (Maybe Registrant)) -> m (Event t (Maybe Registrant))
+router :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First MyEvent) m) => String -> Maybe Registrant -> (Text -> Dynamic t Bool) -> (Text -> Dynamic t Bool) -> (Text -> Text -> Dynamic t (Maybe Registrant)) -> m ()
 router url loggedInUser usernameAlreadyTaken emailAlreadyTaken loginUser
-  | url == baseURL                               = homePage loggedInUser $> never
+  | url == baseURL                               = homePage loggedInUser
   | url == registerURL && isNothing loggedInUser = register usernameAlreadyTaken emailAlreadyTaken
   | url == loginURL && isNothing loggedInUser    = login loginUser
   | url == settingsURL && isJust loggedInUser    = settings loggedInUser
-  | otherwise                                    = homePage loggedInUser $> never -- TODO: 404 page
+  | otherwise                                    = homePage loggedInUser-- TODO: 404 page
 
 
 -- this simulates an entire browser tab with a URL bar 
-browser :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m) => (Text -> Dynamic t Bool) -> (Text -> Dynamic t Bool) -> (Text -> Text -> Dynamic t (Maybe Registrant)) -> m (Event t (Maybe Registrant))
+browser :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First Registrant) m) => (Text -> Dynamic t Bool) -> (Text -> Dynamic t Bool) -> (Text -> Text -> Dynamic t (Maybe Registrant)) -> m ()
 browser usernameAlreadyTaken emailAlreadyTaken loginUser = mdo
-  (newUser, urlBarUpdates) <- runEventWriterT $ mdo
+  let allEvents = getFirst <$> _allEvents
+  (_, _allEvents) <- runEventWriterT $ mdo
     divClass "browser" $ mdo
       urlElem <- inputElement $ def
-        & inputElementConfig_setValue .~ (pack . getFirst <$> urlBarUpdates) 
+        & inputElementConfig_setValue .~ (pack <$> urlBarUpdates) 
         & inputElementConfig_initialValue .~ pack initialURL -- this starts the URL value
         & inputElementConfig_elementConfig.elementConfig_initialAttributes 
           .~ Map.fromList 
@@ -284,12 +289,16 @@ browser usernameAlreadyTaken emailAlreadyTaken loginUser = mdo
             , ("value", pack initialURL) -- and this overwritest the URL value
             ] 
       let urlB = unpack <$> _inputElement_value urlElem -- TODO: only push new URL values on Enter-key-presses
-      dyn $ navbar <$> urlB <*> loggedInUser
-      newUserNested <- dyn $ router <$> urlB <*> loggedInUser <*> constDyn usernameAlreadyTaken <*> constDyn emailAlreadyTaken <*> constDyn loginUser
-      newUser <- switchHold never newUserNested
-      loggedInUser <- holdDyn Nothing newUser
-      pure newUser
-  pure newUser
+      dyn_ $ navbar <$> urlB <*> loggedInUser
+      dyn_ $ router <$> urlB <*> loggedInUser <*> constDyn usernameAlreadyTaken <*> constDyn emailAlreadyTaken <*> constDyn loginUser
+      
+      let urlBarUpdates = fforMaybe allEvents (\e -> case e of { NewURL s -> Just s; _ -> Nothing })
+      loggedInUser <- holdDyn Nothing $ fforMaybe allEvents (\e -> case e of { Login r -> Just (Just r); Logout -> Just Nothing; _ -> Nothing})
+      pure ()
+
+  let newUserE = fforMaybe allEvents (\e -> case e of { Login r -> Just (First r); _ -> Nothing })
+  tellEvent newUserE
+  pure ()
 
 baseURL :: String
 baseURL = "denote-conduit.com/"
@@ -312,9 +321,9 @@ initialURL = registerURL
 -- TODO: store state from previous runs, and migrate between them
 app :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m) => m ()
 app = divClass "universe" $ mdo
-  newUser <- browser usernameAlreadyTaken emailAlreadyTaken loginUser
-  newUser1 <- browser usernameAlreadyTaken emailAlreadyTaken loginUser
-  users <- foldDyn addUser [Registrant "a" "b" "c"] $ fmapMaybe id (leftmost [newUser, newUser1]) -- TODO UUID and switch to map? & leftmost is not quite right
+  (_, newUser) <- runEventWriterT $ browser usernameAlreadyTaken emailAlreadyTaken loginUser
+  (_, newUser1) <- runEventWriterT $ browser usernameAlreadyTaken emailAlreadyTaken loginUser
+  users <- foldDyn addUser [Registrant "a" "b" "c"] $ (getFirst <$>) $ newUser <> newUser1 -- TODO UUID and switch to map? & leftmost is not quite right
 
 
   -- TODO: model these properly: Event a -> Event b
