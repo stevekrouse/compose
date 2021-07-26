@@ -6,6 +6,11 @@
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Frontend where
 
@@ -24,6 +29,7 @@ import Obelisk.Frontend
 import Obelisk.Route
 import Obelisk.Generated.Static
 import Common.Route
+import Control.Monad.Trans (lift)
 
 
 -- someone trying to register
@@ -257,12 +263,32 @@ buttonClass klass m = do
   pure $ () <$ domEvent Click el
 
 
+
+newtype MyEffectsT t m a = MyEffectsT (EventWriterT t (First String) (EventWriterT t (First (Maybe Registrant)) m) a)
+  deriving (Applicative, Functor, Monad, NotReady t, Adjustable t)
+
+deriving instance (DomBuilder t m) => DomBuilder t (MyEffectsT t m)
+
+runMyEffects :: (Reflex t, Monad m) => MyEffectsT t m a -> m (Event t String, Event t (Maybe Registrant))
+runMyEffects (MyEffectsT ma) = do
+  ((a, ev1), ev2) <- runEventWriterT . runEventWriterT $ ma
+  pure (getFirst <$> ev1, getFirst <$> ev2)
+
+tellRoute :: (Reflex t, MonadHold t m) => String -> MyEffectsT t m ()
+tellRoute r = MyEffectsT $ tellEvent . (First r <$) =<< now
+
+tellRegistered :: (Reflex t, MonadHold t m) => (First (Maybe Registrant)) -> MyEffectsT t m ()
+tellRegistered r = MyEffectsT $ lift . tellEvent . (r <$) =<< now
+
+router :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m) => String -> Maybe Registrant -> (Text -> Dynamic t Bool) -> (Text -> Dynamic t Bool) -> (Text -> Text -> Dynamic t (Maybe Registrant)) -> MyEffectsT t m ()
+router url loggedInUser usernameAlreadyTaken emailAlreadyTaken loginUser = pure ()
+
 -- maps the URL bar to a page
 -- passes the eventWriter updates as URL updates
 -- passes the output Event Maybe Registrant as authentication events
 -- TOODO: how do we funnel further events up to the global level?
-router :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First String) m) => String -> Maybe Registrant -> (Text -> Dynamic t Bool) -> (Text -> Dynamic t Bool) -> (Text -> Text -> Dynamic t (Maybe Registrant)) -> m (Event t (Maybe Registrant))
-router url loggedInUser usernameAlreadyTaken emailAlreadyTaken loginUser
+routerOld :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First String) m) => String -> Maybe Registrant -> (Text -> Dynamic t Bool) -> (Text -> Dynamic t Bool) -> (Text -> Text -> Dynamic t (Maybe Registrant)) -> m (Event t (Maybe Registrant))
+routerOld url loggedInUser usernameAlreadyTaken emailAlreadyTaken loginUser
   | url == baseURL                               = homePage loggedInUser $> never
   | url == registerURL && isNothing loggedInUser = register usernameAlreadyTaken emailAlreadyTaken
   | url == loginURL && isNothing loggedInUser    = login loginUser
@@ -273,10 +299,10 @@ router url loggedInUser usernameAlreadyTaken emailAlreadyTaken loginUser
 -- this simulates an entire browser tab with a URL bar 
 browser :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m) => (Text -> Dynamic t Bool) -> (Text -> Dynamic t Bool) -> (Text -> Text -> Dynamic t (Maybe Registrant)) -> m (Event t (Maybe Registrant))
 browser usernameAlreadyTaken emailAlreadyTaken loginUser = mdo
-  (newUser, urlBarUpdates) <- runEventWriterT $ mdo
+  (urlBarUpdates, newUser) <- runMyEffects $ mdo
     divClass "browser" $ mdo
       urlElem <- inputElement $ def
-        & inputElementConfig_setValue .~ (pack . getFirst <$> urlBarUpdates) 
+        & inputElementConfig_setValue .~ (pack <$> urlBarUpdates) 
         & inputElementConfig_initialValue .~ pack initialURL -- this starts the URL value
         & inputElementConfig_elementConfig.elementConfig_initialAttributes 
           .~ Map.fromList 
@@ -285,8 +311,7 @@ browser usernameAlreadyTaken emailAlreadyTaken loginUser = mdo
             ] 
       let urlB = unpack <$> _inputElement_value urlElem -- TODO: only push new URL values on Enter-key-presses
       dyn $ navbar <$> urlB <*> loggedInUser
-      newUserNested <- dyn $ router <$> urlB <*> loggedInUser <*> constDyn usernameAlreadyTaken <*> constDyn emailAlreadyTaken <*> constDyn loginUser
-      newUser <- switchHold never newUserNested
+      dyn $ router <$> urlB <*> loggedInUser <*> constDyn usernameAlreadyTaken <*> constDyn emailAlreadyTaken <*> constDyn loginUser
       loggedInUser <- holdDyn Nothing newUser
       pure newUser
   pure newUser
