@@ -7,7 +7,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE FlexibleContexts #-}
 
-
 module Frontend where
 
 import Control.Lens
@@ -21,22 +20,23 @@ import Control.Monad.Fix (MonadFix)
 import Data.Maybe (isNothing, catMaybes, isJust)
 import Data.Semigroup (First (..))
 import Data.Foldable (find)
-
-
 import Obelisk.Frontend
 import Obelisk.Route
 import Obelisk.Generated.Static
-
-
 import Common.Route
 
 
+-- someone trying to register
+-- may or may not become a User depending on validations
+-- TODO: create User type with more fields, and convert validated registrats over
 data Registrant = Registrant
   { _username :: Text
   , _email :: Text
   , _password :: Text
   } deriving (Show)
 
+-- validates registrants on its own merits
+-- as well as on the results of checking if the username or email are already taken
 validate :: Registrant -> Bool -> Bool -> [ String ]
 validate (Registrant username email password) usernameAlreadyTaken_ emailAlreadyTaken_ =
     catMaybes [
@@ -48,14 +48,22 @@ validate (Registrant username email password) usernameAlreadyTaken_ emailAlready
       if null $ unpack password then Just "password can't be blank" else Nothing
     ]
 
--- >>> validate (Just emptyRegistrant) False False
--- ["password is too short (minimum is 8 characters)","username can't be blank","email can't be blank","password can't be blank"]
-
-register :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First String) m) => (Text -> Dynamic t Bool) -> (Text -> Dynamic t Bool) -> m (Event t (Maybe  Registrant))
+-- UI to register
+-- inputs functions to test whether username or email already taken
+-- TODO: model these functions as as Text-> Event Bool (where the Event represents the Server response)
+register 
+  :: ( DomBuilder t m
+     , PostBuild t m
+     , MonadHold t m
+     , MonadFix m
+     , EventWriter t (First String) m
+     ) => (Text -> Dynamic t Bool) 
+       -> (Text -> Dynamic t Bool) 
+       -> m (Event t (Maybe  Registrant))
 register usernameAlreadyTaken emailAlreadyTaken = divClass "auth-page" $ divClass "container page" $ divClass "row" $ divClass "col-md-6 offset-md-3 col-xs-12" $ mdo
     elClass "h1" "text-xs-center" $ text "Sign up"
-    loginNav <- elClass "p" "text-xs-center" $ -- TODO get loginNav back up to toplevel
-      aClass baseURL "" $ text "Already have an account?"
+    elClass "p" "text-xs-center" $
+      aClass loginURL "" $ text "Already have an account?"
 
     elClass "ul" "error-messages" $
       simpleList errors (el "li" . dynText . fmap pack)
@@ -106,13 +114,13 @@ register usernameAlreadyTaken emailAlreadyTaken = divClass "auth-page" $ divClas
     pure $ Just <$> goodUser
 
 
-
 homePage :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m) => Maybe Registrant -> m ()
 homePage loggedInUser = elClass "div" "home-page" $ mdo
   elClass "div" "banner" $
     elClass "div" "container" $ do
       elClass "h1" "logo-font" $ text "conduit"
       el "p" $ text "A place to share your knowledge"
+
 
 aClass :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First String) m) => String -> String -> m () -> m ()
 aClass route klass contents = do
@@ -147,6 +155,7 @@ navbar url loggedInUser = do
     navItem :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First String) m) => String -> m () -> m ()
     navItem route contents = elClass "li" "nav-item" $ do
       aClass route ("nav-link" ++ if url == route then " active" else "") contents
+
 
 settings :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First String) m) => Maybe Registrant -> m (Event t (Maybe Registrant))
 settings Nothing = pure never
@@ -209,8 +218,8 @@ login loginUser = elClass "div" "auth-page" $ do
       elClass "div" "col-md-6 offset-md-3 col-xs-12" $ mdo
         elClass "h1" "text-xs-center" $ text "Sign in"
 
-        elClass "p" "text-xs-center" $ blank
-          -- routeLink (FrontendRoute_Register :/ ()) $ text "Need an account?"
+        elClass "p" "text-xs-center" $
+          aClass registerURL "" $ text "Need an account?"
 
         -- errorDyn <- holdDyn Nothing $ leftmost [Nothing <$ submitE, Just <$> errorE]
 
@@ -241,19 +250,27 @@ login loginUser = elClass "div" "auth-page" $ do
 
           pure loggedInUser
 
+
 buttonClass :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First String) m) => Text -> m a -> m (Event t ())
 buttonClass klass m = do
   (el, _) <- elAttr' "button" ("class" =: klass <> "type" =: "button") m
   pure $ () <$ domEvent Click el
 
+
+-- maps the URL bar to a page
+-- passes the eventWriter updates as URL updates
+-- passes the output Event Maybe Registrant as authentication events
+-- TOODO: how do we funnel further events up to the global level?
 router :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m, EventWriter t (First String) m) => String -> Maybe Registrant -> (Text -> Dynamic t Bool) -> (Text -> Dynamic t Bool) -> (Text -> Text -> Dynamic t (Maybe Registrant)) -> m (Event t (Maybe Registrant))
 router url loggedInUser usernameAlreadyTaken emailAlreadyTaken loginUser
   | url == baseURL                               = homePage loggedInUser $> never
   | url == registerURL && isNothing loggedInUser = register usernameAlreadyTaken emailAlreadyTaken
   | url == loginURL && isNothing loggedInUser    = login loginUser
   | url == settingsURL && isJust loggedInUser    = settings loggedInUser
-  | otherwise                                    = homePage loggedInUser $> never
+  | otherwise                                    = homePage loggedInUser $> never -- TODO: 404 page
 
+
+-- this simulates an entire browser tab with a URL bar 
 browser :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m) => (Text -> Dynamic t Bool) -> (Text -> Dynamic t Bool) -> (Text -> Text -> Dynamic t (Maybe Registrant)) -> m (Event t (Maybe Registrant))
 browser usernameAlreadyTaken emailAlreadyTaken loginUser = mdo
   (newUser, urlBarUpdates) <- runEventWriterT $ mdo
@@ -290,12 +307,18 @@ initialURL :: String
 initialURL = registerURL
 
 
+-- this runs multiple browser tabs in the same window
+-- it proccesses global state, and feeds it back into the browsers
+-- TODO: store state from previous runs, and migrate between them
 app :: (DomBuilder t m, PostBuild t m, MonadHold t m, MonadFix m) => m ()
 app = divClass "universe" $ mdo
   newUser <- browser usernameAlreadyTaken emailAlreadyTaken loginUser
   newUser1 <- browser usernameAlreadyTaken emailAlreadyTaken loginUser
   users <- foldDyn addUser [Registrant "a" "b" "c"] $ fmapMaybe id (leftmost [newUser, newUser1]) -- TODO UUID and switch to map? & leftmost is not quite right
 
+
+  -- TODO: model these properly: Event a -> Event b
+  -- where we add in an artifical delay to simulate network load time
   let usernameAlreadyTaken username_ = isJust . find (== username_) . map _username <$> users
       emailAlreadyTaken email_ = isJust . find (== email_) . map _email <$> users
       loginUser email_ password_ = find (\r -> _email r == email_ && _password r == password_) <$> users
@@ -304,6 +327,7 @@ app = divClass "universe" $ mdo
   dynText $ fmap (pack . show) users
 
   pure ()
+
 
 frontend :: Frontend (R FrontendRoute)
 frontend = Frontend
